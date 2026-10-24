@@ -6,7 +6,7 @@ Tell Claude Code how proactive to be, from "only what I asked" to "proactively i
 
 ## What hurts, and what doesn't
 
-You ask about a $60 steak and get an unasked lecture on mechanically tenderized beef and USDA 145°F. That's proactive AI being proactively insane. But the same reflex, aimed on purpose, is a brainstorming partner: the tangent you'd never have thought of. The problem isn't the madness. It's that you don't get to choose when.
+You're planning a nice Sunday dinner, nobody mentioned steak, and the assistant volunteers a lecture on mechanically tenderized $60 beef and USDA 145°F. That's proactive AI being proactively insane. But the same reflex, aimed on purpose, is a brainstorming partner: the tangent you'd never have thought of. The problem isn't the madness. It's that you don't get to choose when.
 
 ## The dial
 
