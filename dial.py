@@ -14,10 +14,11 @@ It works as a UserPromptSubmit hook: it only adds a short note to Claude's conte
 """
 import json
 import os
+import re
 import shutil
 import sys
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 NOTES = {
     0: ("[proactivity-dial: quiet] Answer only what was asked. Add no unasked warnings, safety notes, tips, "
         "alternatives or follow-up offers. If something is truly dangerous, say it in one line at the end."),
@@ -28,8 +29,17 @@ NOTES = {
         "\"proactively insane:\", give three deliberately far-fetched tangents: one practical, one sideways, one "
         "absurd but oddly useful. Label them clearly so nobody mistakes them for advice. This is for inspiration."),
 }
-PREFIX = {"--": 0, "??": 2, "!!": 3}
-NAMES = {0: "quiet", 1: "normal", 2: "curious", 3: "unhinged"}
+NOTES["strict"] = (
+    "[proactivity-dial: strict] Do only what was asked, exactly as asked. If what you find contradicts the "
+    "instruction or the user's assumptions, stop and ask before going on: do not quietly change the plan or your "
+    "assumptions. End your reply with a section \"Beyond the ask:\" listing what you wanted to do beyond the "
+    "request and did not do, and any assumption that turned out wrong (or \"Beyond the ask: none.\").")
+PREFIX = {"--": 0, "??": 2, "!!": 3, "==": "strict"}
+NAMES = {0: "quiet", 1: "normal", 2: "curious", 3: "unhinged", "strict": "strict"}
+BEYOND = re.compile(r"(?im)^[\s*#>_-]*beyond the ask\b")
+BLOCK_REASON = ("proactivity-dial strict: end your reply with a \"Beyond the ask:\" section listing what you "
+                "wanted to do beyond the request and did not do, and any assumption that turned out wrong "
+                "(or \"Beyond the ask: none.\").")
 
 
 def _dir():
@@ -38,19 +48,24 @@ def _dir():
     return d
 
 
+def _parse(v):
+    v = str(v).strip().lower()
+    return "strict" if v == "strict" else int(v)
+
+
 def get_level():
     try:
         with open(os.path.join(_dir(), "level"), encoding="utf-8") as f:
-            n = int(f.read().strip())
+            n = _parse(f.read())
         return n if n in NOTES else 1
     except (OSError, ValueError):
         return 1
 
 
 def set_level(n):
-    n = int(n)
+    n = _parse(n)
     if n not in NOTES:
-        raise ValueError("the dial goes from 0 to 3")
+        raise ValueError("the dial goes from 0 to 3, or 'strict'")
     with open(os.path.join(_dir(), "level"), "w", encoding="utf-8") as f:
         f.write(str(n))
     return n
@@ -61,15 +76,68 @@ def level_for(prompt):
     return PREFIX.get(head, get_level())
 
 
+def _session_file(session_id):
+    safe = re.sub(r"[^A-Za-z0-9_-]", "_", str(session_id or "default"))[:80]
+    d = os.path.join(_dir(), "sessions")
+    os.makedirs(d, exist_ok=True)
+    return os.path.join(d, safe)
+
+
 def hook(stdin_text):
-    """UserPromptSubmit: print the note for this prompt's level (nothing at level 1). Never blocks."""
+    """UserPromptSubmit: print the note for this prompt's level (nothing at level 1). Never blocks.
+    Remembers per session whether this turn is strict, for the Stop check."""
     try:
-        prompt = json.loads(stdin_text or "{}").get("prompt", "")
+        data = json.loads(stdin_text or "{}")
+        prompt = data.get("prompt", "")
     except (ValueError, AttributeError):
         return 0
-    note = NOTES[level_for(prompt)]
+    level = level_for(prompt)
+    try:
+        flag = _session_file(data.get("session_id"))
+        if level == "strict":
+            open(flag, "w").close()
+        elif os.path.exists(flag):
+            os.remove(flag)
+    except OSError:
+        pass
+    note = NOTES[level]
     if note:
         print(note)
+    return 0
+
+
+def _last_assistant_text(transcript_path):
+    last = ""
+    with open(transcript_path, encoding="utf-8", errors="replace") as f:
+        for line in f:
+            try:
+                e = json.loads(line)
+            except ValueError:
+                continue
+            msg = e.get("message") or {}
+            if e.get("type") != "assistant" and msg.get("role") != "assistant":
+                continue
+            content = msg.get("content")
+            texts = [content] if isinstance(content, str) else \
+                [c.get("text", "") for c in content or [] if isinstance(c, dict) and c.get("type") == "text"]
+            text = "\n".join(t for t in texts if t)
+            if text.strip():
+                last = text
+    return last
+
+
+def stop_hook(stdin_text):
+    """Stop: in a strict turn, the reply must end with a "Beyond the ask:" section, or the turn cannot end.
+    Never loops (stop_hook_active), never blocks on its own error."""
+    try:
+        data = json.loads(stdin_text or "{}")
+        if data.get("stop_hook_active") or not os.path.exists(_session_file(data.get("session_id"))):
+            return 0
+        text = _last_assistant_text(data.get("transcript_path", ""))
+    except (ValueError, AttributeError, OSError):
+        return 0
+    if not BEYOND.search(text):
+        print(json.dumps({"decision": "block", "reason": BLOCK_REASON}))
     return 0
 
 
@@ -81,9 +149,10 @@ def install(settings_path, script=None):
         with open(settings_path, encoding="utf-8") as f:
             data = json.load(f)
         shutil.copy2(settings_path, settings_path + ".bak")
-    entries = data.setdefault("hooks", {}).setdefault("UserPromptSubmit", [])
-    if not any("dial.py" in c.get("command", "") for h in entries for c in h.get("hooks", [])):
-        entries.append({"hooks": [{"type": "command", "command": f'{py} "{script}" hook'}]})
+    for event, cmd in (("UserPromptSubmit", "hook"), ("Stop", "stop")):
+        entries = data.setdefault("hooks", {}).setdefault(event, [])
+        if not any("dial.py" in c.get("command", "") for h in entries for c in h.get("hooks", [])):
+            entries.append({"hooks": [{"type": "command", "command": f'{py} "{script}" {cmd}'}]})
     os.makedirs(os.path.dirname(os.path.abspath(settings_path)), exist_ok=True)
     with open(settings_path, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
@@ -94,22 +163,24 @@ def main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
     cmd = argv[0] if argv else "get"
     if cmd in ("-h", "--help"):
-        print(__doc__ + "\nusage: dial.py get | set 0..3 | hook | install [SETTINGS]")
+        print(__doc__ + "\nusage: dial.py get | set 0..3|strict | hook | stop | install [SETTINGS]")
         return 0
     if cmd == "get":
         n = get_level()
-        print(f"{n} ({NAMES[n]})")
+        print(n if n == "strict" else f"{n} ({NAMES[n]})")
         return 0
     if cmd == "set":
         try:
             n = set_level(argv[1])
         except (IndexError, ValueError):
-            print("usage: dial.py set 0|1|2|3", file=sys.stderr)
+            print("usage: dial.py set 0|1|2|3|strict", file=sys.stderr)
             return 2
-        print(f"proactivity: {n} ({NAMES[n]})")
+        print(f"proactivity: {n}" if n == "strict" else f"proactivity: {n} ({NAMES[n]})")
         return 0
     if cmd == "hook":
         return hook(sys.stdin.buffer.read().decode("utf-8", "replace"))
+    if cmd == "stop":
+        return stop_hook(sys.stdin.buffer.read().decode("utf-8", "replace"))
     if cmd == "install":
         target = argv[1] if len(argv) > 1 else os.path.join(os.path.expanduser("~"), ".claude", "settings.json")
         print(f"installed into {install(target)} (a .bak was left next to it)")
