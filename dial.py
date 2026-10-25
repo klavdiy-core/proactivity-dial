@@ -18,7 +18,7 @@ import re
 import shutil
 import sys
 
-__version__ = "0.2.0"
+__version__ = "0.2.1"
 NOTES = {
     0: ("[proactivity-dial: quiet] Answer only what was asked. Add no unasked warnings, safety notes, tips, "
         "alternatives or follow-up offers. If something is truly dangerous, say it in one line at the end."),
@@ -42,9 +42,11 @@ BLOCK_REASON = ("proactivity-dial strict: end your reply with a \"Beyond the ask
                 "(or \"Beyond the ask: none.\").")
 
 
-def _dir():
+def _dir(create=False):
+    """The state folder; created only when something is written (reading the dial leaves no trace)."""
     d = os.environ.get("PROACTIVITY_DIAL_DIR") or os.path.join(os.path.expanduser("~"), ".claude", "proactivity-dial")
-    os.makedirs(d, exist_ok=True)
+    if create:
+        os.makedirs(d, exist_ok=True)
     return d
 
 
@@ -66,7 +68,7 @@ def set_level(n):
     n = _parse(n)
     if n not in NOTES:
         raise ValueError("the dial goes from 0 to 3, or 'strict'")
-    with open(os.path.join(_dir(), "level"), "w", encoding="utf-8") as f:
+    with open(os.path.join(_dir(create=True), "level"), "w", encoding="utf-8") as f:
         f.write(str(n))
     return n
 
@@ -76,10 +78,11 @@ def level_for(prompt):
     return PREFIX.get(head, get_level())
 
 
-def _session_file(session_id):
+def _session_file(session_id, create=False):
     safe = re.sub(r"[^A-Za-z0-9_-]", "_", str(session_id or "default"))[:80]
     d = os.path.join(_dir(), "sessions")
-    os.makedirs(d, exist_ok=True)
+    if create:
+        os.makedirs(d, exist_ok=True)
     return os.path.join(d, safe)
 
 
@@ -93,7 +96,7 @@ def hook(stdin_text):
         return 0
     level = level_for(prompt)
     try:
-        flag = _session_file(data.get("session_id"))
+        flag = _session_file(data.get("session_id"), create=(level == "strict"))
         if level == "strict":
             open(flag, "w").close()
         elif os.path.exists(flag):
@@ -106,7 +109,18 @@ def hook(stdin_text):
     return 0
 
 
+def _is_prompt(e, msg):
+    """A user line that starts a new turn: the person's own words, not a tool result coming back."""
+    if e.get("type") != "user" and msg.get("role") != "user":
+        return False
+    content = msg.get("content")
+    if isinstance(content, str):
+        return bool(content.strip())
+    return any(isinstance(c, dict) and c.get("type") == "text" for c in content or [])
+
+
 def _last_assistant_text(transcript_path):
+    """The last assistant text of the CURRENT turn only (an earlier turn's reply does not count)."""
     last = ""
     with open(transcript_path, encoding="utf-8", errors="replace") as f:
         for line in f:
@@ -115,6 +129,9 @@ def _last_assistant_text(transcript_path):
             except ValueError:
                 continue
             msg = e.get("message") or {}
+            if _is_prompt(e, msg):
+                last = ""
+                continue
             if e.get("type") != "assistant" and msg.get("role") != "assistant":
                 continue
             content = msg.get("content")
@@ -126,6 +143,19 @@ def _last_assistant_text(transcript_path):
     return last
 
 
+HEADING = re.compile(r"(?m)^\s*(?![-*+]\s|\d+[.)]\s)(#{1,6}\s|\*\*[^*\n]+\*\*\s*$|[^\n]{1,60}:\s*$)")
+
+
+def closes_with_beyond(text):
+    """The reply ENDS with the section: the last "Beyond the ask" is not followed by another heading."""
+    found = list(BEYOND.finditer(text))
+    if not found:
+        return False
+    rest = text[found[-1].end():]
+    first_line, _, after = rest.partition("\n")
+    return not HEADING.search(after)
+
+
 def stop_hook(stdin_text):
     """Stop: in a strict turn, the reply must end with a "Beyond the ask:" section, or the turn cannot end.
     Never loops (stop_hook_active), never blocks on its own error."""
@@ -133,10 +163,16 @@ def stop_hook(stdin_text):
         data = json.loads(stdin_text or "{}")
         if data.get("stop_hook_active") or not os.path.exists(_session_file(data.get("session_id"))):
             return 0
-        text = _last_assistant_text(data.get("transcript_path", ""))
+        path = data.get("transcript_path", "")
     except (ValueError, AttributeError, OSError):
         return 0
-    if not BEYOND.search(text):
+    try:
+        text = _last_assistant_text(path)
+    except OSError:
+        print(f"proactivity-dial: could not read the transcript ({path!r}); the strict check was not made",
+              file=sys.stderr)
+        return 0
+    if not closes_with_beyond(text):
         print(json.dumps({"decision": "block", "reason": BLOCK_REASON}))
     return 0
 
@@ -151,8 +187,9 @@ def install(settings_path, script=None):
         shutil.copy2(settings_path, settings_path + ".bak")
     for event, cmd in (("UserPromptSubmit", "hook"), ("Stop", "stop")):
         entries = data.setdefault("hooks", {}).setdefault(event, [])
-        if not any("dial.py" in c.get("command", "") for h in entries for c in h.get("hooks", [])):
-            entries.append({"hooks": [{"type": "command", "command": f'{py} "{script}" {cmd}'}]})
+        command = f'{py} "{script}" {cmd}'
+        if not any(c.get("command", "") == command for h in entries for c in h.get("hooks", [])):
+            entries.append({"hooks": [{"type": "command", "command": command}]})
     os.makedirs(os.path.dirname(os.path.abspath(settings_path)), exist_ok=True)
     with open(settings_path, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
