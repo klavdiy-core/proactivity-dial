@@ -55,7 +55,11 @@ It works as a `UserPromptSubmit` hook: it adds one short note to Claude's contex
 curl -O https://raw.githubusercontent.com/klavdiy-core/proactivity-dial/main/dial.py
 python dial.py install          # adds two hooks to ~/.claude/settings.json: UserPromptSubmit (the note) and Stop
                                 # (the strict check); your other hooks stay; a .bak is left
+python dial.py install <path>   # the same into another settings file, e.g. a project's .claude/settings.json
 ```
+
+The level and the per-session strict marks live in `~/.claude/proactivity-dial/`; set `PROACTIVITY_DIAL_DIR` to keep
+them elsewhere. Nothing is created there until you `set` a level or start a strict turn.
 
 ## Limits
 
@@ -69,7 +73,7 @@ python dial.py install          # adds two hooks to ~/.claude/settings.json: Use
 python -m unittest discover -s tests
 ```
 
-Default silence, each level's note, the level surviving between prompts, prefixes working for one message only and only at the start, a broken level file falling back to normal, the range check, garbage input never blocking, and an install that keeps your other hooks. Strict: the note, a reply without the section blocked and one with it let through, only the last message counting, no loop, per-session state, a one-message `==` not sticking, a broken transcript never blocking. Every check here was broken on purpose to see a test go red.
+Default silence, each level's note, the level surviving between prompts, prefixes working for one message only and only at the start, a broken level file falling back to normal, the range check, garbage input never blocking, and an install that keeps your other hooks. Strict: the note, a reply without the section blocked and one with it let through, only the last message counting, no loop, per-session state, a one-message `==` not sticking, a broken transcript never blocking. Then: the section must close the reply (one mentioned in the middle, with more headings after it, does not count); only the current turn counts (the previous turn's section does not carry over); an unreadable transcript is said aloud on stderr instead of passing in silence; `get` creates no folders; install is not fooled by another tool's `dial.py`. Every check here was broken on purpose to see a test go red.
 
 ## License
 
